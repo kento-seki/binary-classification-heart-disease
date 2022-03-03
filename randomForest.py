@@ -3,117 +3,108 @@
 # (https://www.kaggle.com/fedesoriano/heart-failure-prediction).
 
 # Created by Kento Seki between 10th December and 22nd December 2021.
+# Updated between 4th Jan 2022 and 20th Feb 2022. 
+
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+# TO DO:
+# - Fix bug: set seed 4807, forestSizes list(range(50)) and attrSubSizes list(range(2,6)) 
+# ----> some rows of the tallies do NOT add up to the forestSize
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 
 # THINGS TO THINK ABOUT: 
-# - maximum depth as hyperparameter?
+ # - maximum tree depth as hyperparameter?
+# - more evaluation methods than just accuracy...
+#   https://machinelearningmastery.com/classification-accuracy-is-not-enough-more-performance-measures-you-can-use/ 
 
-
-# Out-of-bag error - evaluation method:
-# After each tree is created, take the rows of data that were NOT 
-# used to build it and use it to make predictions of HeartDisease for those 
-# rows. Record a tally of the number of TRUE and FALSE predictions for each
-# row. Repeat this process for every tree.
+# Evaluate model using a validation set allocated at the beginning
+# --> no longer using out-of-bag error as the evaluation measure
 
 from classes import Node, Tree
 import pandas as pd
 import random
 
-def buildForest():
-    # SET HYPERPARAMETERS (from input)
-    hp = getHyperparams()
-    numAttrs, numTrees = hp[0], hp[1]
+# Finds the best random forest model out of every combination of numAttrs (from
+# attrSubSizes) and numTrees (from forestSizes). Uses the entire training data
+# (train) passed into the function (currently without bootstrapping). 
+# Predictions on the valudation dataset are made simultaneously by splitting the
+# validation data through the tree along with the training data. Returns the 
+# model (stored as list of decision trees) with the highest accuracy on val, 
+# along with the number of indecisive predictions made and the model's
+# hyperparameters.
+def findBestForest(train, val, attrSubSizes, forestSizes):
 
-    # BUILD MODEL
-    df = pd.read_csv('heart.csv') # set directory to /Workspace/HeartDisease
+    best = {'forest': None, 'numTrees': None, 'numAttrs': None,
+            'valAcc': 0, 'valnUnsure': None}
 
-    # Change categorical vars to numerical
-    df = catToNum(df)
+    # Iterate through attrSubSizes in descending order to make the algorithm
+    # speed up towards the end, rather than slow down.
+    attrSubSizes.sort(reverse=True)
 
-    # Randomise order of the dataset rows
-    random.seed(97)
-    rows = df.shape[0]
-    shuff_rows = random.sample(range(rows),k = rows)
-    shuff_df = df.iloc[shuff_rows] # need to use df.iloc[] to index rows
+    for numAttrs in attrSubSizes:
 
-    # List to store trees (ith tree in forest[i])
-    forest = []
-    # Tally of out-of-bag predictions
-    emptyTally = {'True': [0] * rows, 'False': [0] * rows, 'PredictedHD': '-'}
-    tally = pd.DataFrame(emptyTally)
-
-    ### OUTER FOR LOOP: FOR EACH TREE IN FOREST
-    print('')
-    print("I'm growing trees as fast as I can...")
-    for i in range(numTrees):
-
-        # Create bootstrapped dataframe
-        btstrap_rows = random.choices(list(range(rows)), k = rows)
-        btstrap_df = shuff_df.iloc[btstrap_rows]
-
-        # Build decision tree
-        # - Choose the best splitting attribute out of a random subset of size m
-        #   (if no split provides improved impurity, don't split - this is a leaf)
-        # - Add the split node to the tree
-        newTree = Tree()
-        newTree.root.data = btstrap_df
-        newTree.root.unusedAttrs = list(range(11))
-        forest.append(newTree)
-
-        # Create the tree by recursively splitting nodes
-        nodeSplit(newTree.root, numAttrs)
-
-        # EVALUATION: make predictions for the out-of-bag data and add to tally
-        outOfBag = pd.concat([df, btstrap_df, btstrap_df]).drop_duplicates(keep=False)
-        for j in range(outOfBag.shape[0]):
-            result = treePredict(outOfBag.iloc[j], forest[i].root)
-            rowIndex = outOfBag.iloc[j].name
-            if result == 'Healthy':
-                tally.iloc[rowIndex, 1] = tally.iloc[rowIndex, 1] + 1
-            elif result == 'Disease':
-                tally.iloc[rowIndex, 0] = tally.iloc[rowIndex, 0] + 1
+        forest = []
+        # Tally of validation set predictions
+        emptyTally = {'Disease': [0] * len(val), 'Healthy': [0] * len(val)}
+        tally = pd.DataFrame(emptyTally)
         
-        # Update progress bar
-        print('0|' + '=' * (i+1) + (numTrees - i - 1) * ' ' + f'|{numTrees}', end="\r")
-    print('')
+        for numTrees in forestSizes:
+            
+            # Add trees to model until we reach the next desired size
+            while len(forest) != numTrees:
+                newTree = Tree()
+                newTree.root.data = train
+                newTree.root.unusedAttrs = list(range(11))
+                forest.append(newTree)
+                # Build the decision tree by recursively splitting nodes
+                nodeSplit(newTree.root, numAttrs, val, tally)
+                # ^ Splits the validation data WHILE building the tree and 
+                #   tallies predictions every time a leaf node is reached
 
-    ### Evaluate out-of-bag error from out-of-bag predictions tally
-    nCorrect = 0
-    nUnsure = 0
-    for i in range(rows):
-        if tally.iloc[i,0] > tally.iloc[i,1]:
-            tally.iloc[i,2] = '1' # TRUE - has heart disease
-        elif tally.iloc[i,0] < tally.iloc[i,1]:
-            tally.iloc[i,2] = '0' # FALSE - does not have heart disease
-        else:
-            tally.iloc[i,2] = '-'
-            nUnsure += 1
+            result = getAccuracy(tally, val)
+            acc, unsure = result[0], result[1]
+            if acc > best['valAcc']:
+                pd.set_option("display.max_rows", None, "display.max_columns", None) ###
+                print(tally[tally['Healthy'] + tally['Disease'] != numTrees]) ###
+                best['forest'] = forest.copy()
+                best['numTrees'] = numTrees
+                best['numAttrs'] = numAttrs
+                best['valAcc'] = acc
+                best['valnUnsure'] = unsure
+                print(f"* Improved model! | {numTrees} trees, {numAttrs} "\
+                    f"attributes | Validation accuracy: {acc}% | "\
+                    f"Indecisive predictions: {unsure}")
 
-        if str(tally.iloc[i,2]) == str(df.iloc[i,11]):
-            nCorrect += 1
+            # Update % progress
+            done = attrSubSizes.index(numAttrs)*len(forestSizes)\
+                + forestSizes.index(numTrees) + 1
+            total = len(attrSubSizes) * len(forestSizes)
+            perc = round(done/total * 100, 2)
+            print(f'Progress: {perc}%', end="\r")
 
-    printModelInfo(df, rows, numAttrs, numTrees, nCorrect, nUnsure)
-    return forest, numTrees
-
-### KEEP GOING...
-# + Evaluate performance with different hyperparameters using confusion matrix
-# + Evaluate using ROC curve (and AUC?)
-# See https://machinelearningmastery.com/classification-accuracy-is-not-enough-more-performance-measures-you-can-use/ 
-# for more
+    return best
 
 ################################################################################
 
-# Get random forest hyperparameters from input.
-def getHyperparams():
-    print('')
-    print("                         *** Hyperparameter Tuning ***")
-    print('')
-    numAttrs = int(input("Enter the number of attributes to sample: "))
-    # ^How many attributes should be sampled as a candidate for each node split?
-    # Less attributes -> trees more random ... more attributes -> less random
-    # This is called 'mtry' in caret's ranger (random forest) method
-    numTrees = int(input("Enter the number of trees: "))
-    # ^How many trees should the forest consist of?
-    return numAttrs, numTrees
+# Calculates the accuracy of the model's predictions on the validation set from
+# the tally.
+def getAccuracy(tally, val):
+    # Use tally to calculate acc (accuracy) and nUnsure
+    nCorrect, nUnsure = 0, 0
+    for i in range(len(val)):
+        if tally.iloc[i,0] > tally.iloc[i,1] and val.iloc[i, 11] == 1:
+            nCorrect += 1
+        elif tally.iloc[i,0] < tally.iloc[i,1] and val.iloc[i, 11] == 0:
+            nCorrect += 1
+        elif tally.iloc[i,0] == tally.iloc[i,1]:
+            nUnsure += 1
+
+    acc = round(nCorrect/len(val) * 100, 2)
+
+    return acc, nUnsure
 
 ################################################################################
 
@@ -142,107 +133,17 @@ def catToNum(df):
 
 ################################################################################
 
-# Calculate the impurity resulting from a split by the given attribute (attr), 
-# at the given point (pt), on the data (df) at the node.
-def splitImp(attrName, pt, df):
-    # rows with attr < pt (left subtree)
-    # (legend: lfTrue = left subtree and has heart dis)
-    lfTrue = df[(df[attrName] < pt) & (df['HeartDisease'] == 1)]
-    lfFalse = df[(df[attrName] < pt) & (df['HeartDisease'] == 0)]
-    numLf = len(lfTrue) + len(lfFalse)
-    # rows with attr > pt (right subtree)
-    rtTrue = df[(df[attrName] > pt) & (df['HeartDisease'] == 1)]
-    rtFalse = df[(df[attrName] > pt) & (df['HeartDisease'] == 0)]
-    numRt = len(rtTrue) + len(rtFalse)
-
-    # Calculate Gini impurity
-    lfImp = 1 - ( len(lfTrue) / numLf )**2   \
-                - ( len(lfFalse) / numLf )**2
-    rtImp = 1 - ( len(rtTrue) / numRt )**2   \
-                - ( len(rtFalse) / numRt )**2
-    # imp = weighted average of leftImp and rightImp (weighted by 
-    # number of rows in the left and right subtrees)
-    imp = lfImp * ( numLf / len(df) ) + rtImp * ( numRt / len(df) )
-    return imp
-
-################################################################################
-
-# Finds the points BETWEEN the distinct values of attrName, each of which we 
-# should try splitting the data by.
-def findSplitPoints(attrName, df):
-        values = df[attrName].unique()
-        values.sort()
-        spltPts = []
-        for i in range(len(values) - 1):
-            spltPts.append((values[i] + values[i+1]) / 2)
-        return spltPts
-
-################################################################################
-
-# Tries splitting the data by pairs of ChestPainType that CANNOT be achieved
-# with a simple splitPoint bewteen 0,1,2,3 (e.g. sending rows with 0 and 2 to 
-# one child while sending the rest to the other child, cannot be achieved with 
-# a splitPoint).
-def PairwiseChestSplits(df):
-    # Store the minimum attainable impurity in info[0]
-    # Store a list with the two ChestPainType values sent to one node in info[1]
-    # -- Possible pair choices: 0-2, 0-3, 1-2, 1-3
-    info = [1, []]
-    for i in [0,1]:
-        for j in [2,3]:
-            # Send rows with ChestPainType i or j to one side, and all other 
-            # rows to the other side - calculate resulting impurity
-            left = df[(df['ChestPainType'] == i) | (df['ChestPainType'] == j) ]
-            numLf = len(left)
-            lfTrue = len(left[left['HeartDisease'] == 1])
-            lfFalse = len(left[left['HeartDisease'] == 0])
-
-            right = df[(df['ChestPainType'] != i) & (df['ChestPainType'] != j)]
-            numRt = len(right)
-            rtTrue = len(right[right['HeartDisease'] == 1])
-            rtFalse = len(right[right['HeartDisease'] == 0])
-            
-            if numLf == 0 or numRt == 0:
-                continue
-            lfImp = 1 - ( lfTrue / numLf )**2   \
-                        - ( lfFalse / numLf )**2
-            rtImp = 1 - ( rtTrue / numRt )**2   \
-                        - ( rtFalse / numRt )**2
-            imp = lfImp * ( numLf / len(df) ) + rtImp * ( numRt / len(df) )
-
-            if imp < info[0]:
-                info[0] = imp
-                info[1] = [i,j]
-    
-    return info
-
-################################################################################
-
-# Assign label to a leaf node based on which categorisation is most common in
-# its data rows (labelled either Healthy or Disease - this is our answer for
-# any data row that reaches this node when using the tree)
-def assignLabel(node):
-    df = node.data
-    if all(df.mode()['HeartDisease'].dropna()) == 0:
-        #print('False is the most common in this leaf node!')
-        node.label = 'Healthy'
-    elif all(df.mode()['HeartDisease'].dropna()) == 1:
-        #print('True is the most common in this leaf node!')
-        node.label = 'Disease'
-    else:
-        print('something is very wrong')
-    return node
-
-################################################################################
-
 # Recursively split the data at the given node (in preorder traversal order: 
-# root->left->right)
-def nodeSplit(node, numAttrs):
-    #print(node.data)
+# root->left->right). Also split the validation data (val) based on decisions
+# made using the training data.
+# In the base case (node is a leaf node), add to the True/False predictions
+# tally for each row in the validation data at that node.
+def nodeSplit(node, numAttrs, val, tally):
     df = node.data
     # Base case for not splitting
     if len(df) <= 5 or len(node.unusedAttrs) == 0:
         node = assignLabel(node)
+        tallyValPredictions(node, val, tally)
         return None
 
     # Calculate impurity of the node as is
@@ -274,26 +175,32 @@ def nodeSplit(node, numAttrs):
             if cInfo[0] < minImp:
                 minAttr, minImp, minPt = attr, cInfo[0], cInfo[1]
 
-    # Make the best split found - send the data to left and right children
+    # Make the best split found (best outcome could be no split)
     if currImp <= minImp:
         node = assignLabel(node)
+        tallyValPredictions(node, val, tally)
         return None
     elif df.columns[minAttr] == 'ChestPainType' and isinstance(minPt, list):
         # ...this means we did a pairwise split of ChestPainType
-        # Store split info at this node
         node.splitAttr = minAttr
         node.splitPt = minPt
         newUnusedAttrs = node.unusedAttrs
         newUnusedAttrs.remove(minAttr)
         
         # Split data between two new children
-        node.left = Node()
-        node.left.data = df[(df['ChestPainType'] == minPt[0]) | (df['ChestPainType'] == minPt[1])]
+        node.left, node.right = Node(), Node()
+        node.left.data = df[(df['ChestPainType'] == minPt[0])\
+            | (df['ChestPainType'] == minPt[1])]
         node.left.unusedAttrs = newUnusedAttrs
-        node.right = Node()
-        node.right.data = df[(df['ChestPainType'] != minPt[0]) & (df['ChestPainType'] != minPt[1])]
+        node.right.data = df[(df['ChestPainType'] != minPt[0])\
+            & (df['ChestPainType'] != minPt[1])]
         node.right.unusedAttrs = newUnusedAttrs
 
+        # Split validation data between new children
+        valLeft = val[(val['ChestPainType'] == minPt[0])\
+            | (val['ChestPainType'] == minPt[1])]
+        valRight = val[(val['ChestPainType'] != minPt[0])\
+            & (val['ChestPainType'] != minPt[1])]
     else:
         node.splitAttr = minAttr
         node.splitPt = minPt
@@ -302,15 +209,255 @@ def nodeSplit(node, numAttrs):
         attrName = df.columns[minAttr]
         
         # Split data between two new children
-        node.left = Node()
+        node.left, node.right = Node(), Node()
         node.left.data = df[df[attrName] < minPt]
         node.left.unusedAttrs = newUnusedAttrs
-        node.right = Node()
         node.right.data = df[df[attrName] > minPt]
         node.right.unusedAttrs = newUnusedAttrs
 
-    nodeSplit(node.left, numAttrs)
-    nodeSplit(node.right, numAttrs)
+        # Split validation data between new children
+        valLeft = val[val[attrName] < minPt]
+        valRight = val[val[attrName] > minPt]
+
+    nodeSplit(node.left, numAttrs, valLeft, tally)
+    nodeSplit(node.right, numAttrs, valRight, tally)
+
+################################################################################
+
+# Calculate the impurity resulting from a split by the given attribute (attr), 
+# at the given point (pt), on the data (df) at the node.
+def splitImp(attrName, pt, df):
+    # rows with attr < pt (left subtree)
+    # (legend: lfTrue = left subtree and has heart dis)
+    lfTrue = df[(df[attrName] < pt) & (df['HeartDisease'] == 1)]
+    lfFalse = df[(df[attrName] < pt) & (df['HeartDisease'] == 0)]
+    numLf = len(lfTrue) + len(lfFalse)
+    # rows with attr > pt (right subtree)
+    rtTrue = df[(df[attrName] > pt) & (df['HeartDisease'] == 1)]
+    rtFalse = df[(df[attrName] > pt) & (df['HeartDisease'] == 0)]
+    numRt = len(rtTrue) + len(rtFalse)
+
+    # Calculate Gini impurity
+    lfImp = 1 - ( len(lfTrue) / numLf )**2   \
+                - ( len(lfFalse) / numLf )**2
+    rtImp = 1 - ( len(rtTrue) / numRt )**2   \
+                - ( len(rtFalse) / numRt )**2
+    # imp = weighted average of leftImp and rightImp (weighted by 
+    # number of rows in the left and right subtrees)
+    imp = lfImp * ( numLf / len(df) ) + rtImp * ( numRt / len(df) )
+    return imp
+
+################################################################################
+
+# Finds the points BETWEEN the distinct values of attrName, each of which we 
+# should try splitting the data by.
+def findSplitPoints(attrName, df):
+    values = df[attrName].unique()
+    values.sort()
+    spltPts = []
+    for i in range(len(values) - 1):
+        spltPts.append((values[i] + values[i+1]) / 2)
+    return spltPts
+
+################################################################################
+
+# Tries splitting the data by pairs of ChestPainType that CANNOT be achieved
+# with a simple splitPoint bewteen 0,1,2,3 (e.g. sending rows with 0 and 2 to 
+# one child while sending the rest to the other child, cannot be achieved with 
+# a splitPoint).
+def PairwiseChestSplits(df):
+    # Store the minimum attainable impurity in info[0]
+    # Store a list with the two ChestPainType values sent to one node in info[1]
+    # -- Possible pair choices: 0-2, 0-3, 1-2, 1-3
+    info = [1, []]
+    for i in [0,1]:
+        for j in [2,3]:
+            # Send rows with ChestPainType i or j to one side, and all other 
+            # rows to the other side - calculate resulting impurity
+            left = df[(df['ChestPainType'] == i) | (df['ChestPainType'] == j) ]
+            numLf = len(left)
+            lfTrue = len(left[left['HeartDisease'] == 1])
+            lfFalse = len(left[left['HeartDisease'] == 0])
+
+            right = df[(df['ChestPainType'] != i) & (df['ChestPainType'] != j)]
+            numRt = len(right)
+            rtTrue = len(right[right['HeartDisease'] == 1])
+            rtFalse = len(right[right['HeartDisease'] == 0])
+            
+            if numLf == 0 or numRt == 0:
+                continue # <--------------------------------------------- (22.2.22) What was this if statement for?
+            lfImp = 1 - ( lfTrue / numLf )**2   \
+                        - ( lfFalse / numLf )**2
+            rtImp = 1 - ( rtTrue / numRt )**2   \
+                        - ( rtFalse / numRt )**2
+            imp = lfImp * ( numLf / len(df) ) + rtImp * ( numRt / len(df) )
+
+            if imp < info[0]:
+                info[0] = imp
+                info[1] = [i,j]
+    
+    return info
+
+################################################################################
+
+# Assign label to a leaf node based on which categorisation is most common in
+# its data rows (labelled either Healthy or Disease - this is our answer for
+# any data row that reaches this node when using the tree)
+def assignLabel(node):
+    df = node.data
+    if all(df.mode()['HeartDisease'].dropna()) == 0:
+        #print('False is the most common in this leaf node!')
+        node.label = 'Healthy'
+    elif all(df.mode()['HeartDisease'].dropna()) == 1:
+        #print('True is the most common in this leaf node!')
+        node.label = 'Disease'
+    else:
+        print('something is very wrong')
+    return node
+
+################################################################################
+
+# Adds to the tally of predictions for the validation dataset for all the 
+# validation data rows that arrived at the given leaf node.
+def tallyValPredictions(node, val, tally):
+    for i in range(len(val)):
+        row = val.iloc[i].name
+        if node.label == 'Healthy':
+            tally.iloc[row, 1] += 1
+        elif node.label == 'Disease':
+            tally.iloc[row, 0] += 1
+        else:
+            print("******** NODE IS UNLABELED!!! ********")
+
+################################################################################
+
+# Passes the testing dataset (df) through each tree in the random forest and 
+# tallies their predictions. Compares the tallied predictions to the actual
+# known results of the testing dataset to determine the percentage accuracy.
+# Returns the accuracy.
+def testModel(forest, df):
+    emptyTally = {'Disease': [0] * len(df), 'Healthy': [0] * len(df)}
+    tally = pd.DataFrame(emptyTally)
+
+    for tree in forest:
+        passData(tree.root, df, tally)
+
+    nCorrect, nUnsure = 0, 0
+    for i in range(len(tally)):
+        if df.iloc[i, 11] == 0 and tally.iloc[i,0] < tally.iloc[i,1]:
+            nCorrect += 1
+        elif df.iloc[i, 11] == 1 and tally.iloc[i,0] > tally.iloc[i,1]:
+            nCorrect += 1
+        elif tally.iloc[i,0] == tally.iloc[i,1]:
+            nUnsure += 1
+
+    acc = round(nCorrect/len(df) * 100, 2)
+    return acc, nUnsure
+
+################################################################################
+
+# Recursively passes the testing dataset (df) through each node in the decision
+# tree. Once a leaf node is encountered, the label of that node is used to 
+# add to the tally of predictions
+def passData(node, df, tally):
+    # Base case - leaf node
+    if node.left is None and node.right is None:
+        # Add to tally using labels
+        for i in range(len(df)):
+            rowIndex = df.iloc[i].name
+            if node.label == 'Healthy':
+                tally.iloc[rowIndex, 1] += 1
+            elif node.label == 'Disease':
+                tally.iloc[rowIndex, 0] += 1
+        return None
+
+    # Recursive case - split data between children nodes
+    minAttr, minPt = node.splitAttr, node.splitPt
+    attrName = df.columns[minAttr]
+    if attrName == 'ChestPainType' and isinstance(minPt, list):
+        # ...this means the node has a pairwise split of ChestPainType
+        dfLeft = df[(df['ChestPainType'] == minPt[0])\
+            | (df['ChestPainType'] == minPt[1])]
+        dfRight = df[(df['ChestPainType'] != minPt[0])\
+            & (df['ChestPainType'] != minPt[1])]
+    else:
+        dfLeft = df[df[attrName] < minPt]
+        dfRight = df[df[attrName] > minPt]
+
+    passData(node.left, dfLeft, tally)
+    passData(node.right, dfRight, tally)
+
+################################################################################
+
+# Displays hyperparameter and performance information about the given model.
+def modelInfo(train, val, hold, model):
+    # Calculate no-info rates for comparison
+    valNoInfo = noInfoRate(val)
+    trainNoInfo = noInfoRate(train)
+    holdNoInfo = noInfoRate(hold)
+
+    # Test model on training set
+    trainRes = testModel(model['forest'], train)
+    trainAcc, trainUnsure = trainRes[0], trainRes[1]
+
+    # Test model on holdout test set
+    holdRes = testModel(model['forest'], hold)
+    holdAcc, holdUnsure = holdRes[0], holdRes[1]
+
+    # Print all info
+    numAttrs, numTrees = model['numAttrs'], model['numTrees']
+    print('')
+    print('')
+    print('///////////////////////////////////////////////////////////////////'\
+        '/////////////')
+    print('')
+    print('                    Heart disease predictor: Random Forest')
+    print('')
+    print(f"      The training data contained {len(train)} rows. "\
+        f"In the chosen model (evaluated") 
+    print(f"      by accuracy on the validation set), {numAttrs} attributes "\
+        "were randomly sampled")
+    print(f"      at each decision point and {numTrees} trees were "\
+        "built.")
+    print('')
+    print('      ** Training set predictions **')
+    print(f"      No information rate: {trainNoInfo[0]}% of samples "\
+        f"{trainNoInfo[1]}")
+    print(f"      ACCURACY (on {len(train)} rows): {trainAcc}%")
+    print(f"      INDECISIVE predictions: {trainUnsure}")
+    print('')
+    print('      ** Validation set predictions **')
+    print(f"      No information rate: {valNoInfo[0]}% of samples "\
+        f"{valNoInfo[1]}")
+    print(f"      ACCURACY (on {len(val)} rows): {model['valAcc']}%")
+    print(f"      INDECISIVE predictions: {model['valnUnsure']}")
+    print('')
+    print('      ** Holdout test set predictions **')
+    print(f"      No information rate: {holdNoInfo[0]}% of samples "\
+        f"{holdNoInfo[1]}")
+    print(f"      ACCURACY (on {len(hold)} rows): {holdAcc}%")
+    print(f"      INDECISIVE predictions: {holdUnsure}")
+    print('')
+    print('///////////////////////////////////////////////////////////////////'\
+        '/////////////')
+    print('')
+
+################################################################################
+
+# Calculates the no-information rate (prediction accuracy obtained by guessing
+# the larger class every single time) given a dataframe.
+def noInfoRate(df):
+    hasDisease = len(df[df['HeartDisease'] == 1])
+    noDisease = len(df[df['HeartDisease'] == 0])
+    if hasDisease > noDisease:
+        largerClass = hasDisease
+        status = 'have heart disease.'
+    else:
+        largerClass = noDisease
+        status = 'do not have heart disease.'
+    
+    rate = round(largerClass/len(df) * 100,2)
+    return rate, status
 
 ################################################################################
 
@@ -323,7 +470,8 @@ def treePredict(df, node):
     
     # Recursive case
     if isinstance(node.splitPt, list) and node.splitAttr == 2:
-        if df.loc['ChestPainType'].item() == node.splitPt[0] or df.loc['ChestPainType'].item() == node.splitPt[1]:
+        if df.loc['ChestPainType'].item() == node.splitPt[0] or \
+            df.loc['ChestPainType'].item() == node.splitPt[1]:
             # ^^ need .item() to make it work because Python interprets
             # the truth value of the condition as a series, even though there
             # is only ever one value for df.loc['ChestPainType']
@@ -331,46 +479,27 @@ def treePredict(df, node):
         else:
             return treePredict(df, node.right)
     else:
-        #print(df.iloc[node.splitAttr])
-        #print('-')
-        #return##
         if df.iloc[node.splitAttr].item() < node.splitPt:
             return treePredict(df, node.left)
         else:
             return treePredict(df, node.right)
-        
 
 # When going thru and predicting with tree, special case for ChestPainType and 
-# node.splitPt being a list ---> this means we used pairwise split, so rather 
+# node.splitPt being a list ---> this means we used a pairwise split, so rather 
 # than splitting by that point we send the rows with CPType in the splitPt list
 # to one side, and all other rows to the other side.
 
 ################################################################################
 
-def printModelInfo(df, rows, numAttrs, numTrees, nCorrect, nUnsure):
-    # Calculate no-info rate for comparison
-    hasDisease = len(df[df['HeartDisease'] == 1])
-    noDisease = len(df[df['HeartDisease'] == 0])
-    if hasDisease > noDisease:
-        largerClass = hasDisease
-        status = 'have heart disease.'
-    else:
-        largerClass = noDisease
-        status = 'do not have heart disease.'
+# Predicts whether the patient described by 'newData' will have heart disease
+# using the given model. Returns the numbers of trees which voted yes and no
+# respectively.
+def predict(newData, model):
+    yesCount, noCount = 0, 0
+    for i in range(len(model['forest'])):
+        if treePredict(newData, model['forest'][i].root) == 'Healthy':
+            noCount += 1
+        else:
+            yesCount += 1
 
-    print('')
-    print('')
-    print('////////////////////////////////////////////////////////////////////////////////')
-    print('')
-    print('                    Heart disease predictor: Random Forest')
-    print('')
-    print(f"      The given dataset contained {rows} rows. {numAttrs} attributes were randomly")
-    print(f"      sampled at each decision point and {numTrees} trees were built.")
-    print('')
-    print(f'      No information rate: {round(largerClass/rows * 100,2)}% of samples {status}')
-    print('')
-    print(f"      ACCURACY of predictions on out-of-bag samples: {round(nCorrect/rows * 100,2)}%")
-    print(f"      INDECISIVE predictions: {nUnsure}")
-    print('')
-    print('////////////////////////////////////////////////////////////////////////////////')
-    print('')
+    return yesCount, noCount
